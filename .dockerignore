@@ -1,0 +1,6 @@
+.devenv
+.git
+.github
+target
+*.pem
+technical specification for klf 200 api.pdf

@@ -1,0 +1,11 @@
+.env
+
+# Rust
+/target/
+
+# Build outputs
+/result
+
+# devenv
+.devenv*
+devenv.local.nix

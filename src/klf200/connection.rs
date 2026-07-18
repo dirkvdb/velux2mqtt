@@ -22,6 +22,7 @@ use super::{
 };
 
 const DEFAULT_KLF_PORT: u16 = 51_200;
+const CONNECTION_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
 
 #[derive(Clone, Copy, Debug)]
 pub struct ConnectionSettings {
@@ -654,7 +655,14 @@ async fn run_actor<S>(
             let _ = reply.send(Err(KlfError::ConnectionClosed));
         }
     }
-    let shutdown_result = writer.shutdown().await.map_err(|error| io_error(&error));
+    let shutdown_result = if let Ok(result) = timeout(CONNECTION_SHUTDOWN_TIMEOUT, writer.shutdown()).await {
+        result.map_err(|error| io_error(&error))
+    } else {
+        log::warn!("timed out closing KLF connection; dropping the socket");
+        Err(KlfError::Io {
+            message: "timed out closing KLF connection".to_owned(),
+        })
+    };
 
     if let Some(reason) = disconnect_reason {
         let _ = event_tx.send(ConnectionEvent::Disconnected(reason));

@@ -28,7 +28,7 @@ clap-verbosity-flag = "3.0"
 env_logger = "0.11"
 fastrand = "2.4"
 log = "0.4"
-rumqttc = { version = "0.25", default-features = false }
+rumqttc = { version = "0.25", default-features = false, features = ["use-rustls-no-provider"] }
 rustls = { version = "0.23", default-features = false, features = ["logging", "ring", "std", "tls12"] }
 rustls-pemfile = "2.2"
 serde = { version = "1.0", features = ["derive"] }

@@ -51,6 +51,14 @@ struct Cli {
     #[arg(long, env = "V2M_MQTT_PORT", default_value_t = 1883)]
     mqtt_port: u16,
 
+    /// Enable MQTT TLS using a PEM CA certificate file.
+    #[arg(long, env = "V2M_MQTT_CA_CERT", conflicts_with = "mqtt_insecure")]
+    mqtt_ca_cert: Option<PathBuf>,
+
+    /// Enable MQTT TLS without validating the server certificate (insecure).
+    #[arg(long, env = "V2M_MQTT_INSECURE")]
+    mqtt_insecure: bool,
+
     #[arg(long, env = "V2M_MQTT_USER", default_value = "")]
     mqtt_user: String,
 
@@ -134,6 +142,8 @@ async fn main() -> Result<()> {
 
     let mut mqtt = MqttConfig::new(cli.mqtt_addr);
     mqtt.port = cli.mqtt_port;
+    mqtt.ca_cert = cli.mqtt_ca_cert;
+    mqtt.insecure = cli.mqtt_insecure;
     mqtt.user = cli.mqtt_user;
     mqtt.password = cli.mqtt_pass;
     mqtt.client_id = cli.mqtt_client_id;
@@ -147,4 +157,55 @@ async fn main() -> Result<()> {
     bridge_config.status_refresh_interval = Duration::from_secs(cli.status_refresh_interval);
 
     VeluxMqttBridge::new(bridge_config)?.run().await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse_options(extra: &[&str]) -> Result<Cli, clap::Error> {
+        let mut args = vec![
+            "velux2mqtt",
+            "--klf-host",
+            "klf.local",
+            "--klf-password",
+            "test-password",
+            "--mqtt-addr",
+            "broker.local",
+        ];
+        args.extend_from_slice(extra);
+        Cli::try_parse_from(args)
+    }
+
+    #[test]
+    fn mqtt_defaults_to_plaintext() {
+        let cli = parse_options(&[]).expect("default options");
+        assert!(cli.mqtt_ca_cert.is_none());
+        assert!(!cli.mqtt_insecure);
+        assert_eq!(cli.mqtt_port, 1883);
+    }
+
+    #[test]
+    fn mqtt_certificate_option() {
+        let cli = parse_options(&["--mqtt-ca-cert", "ca.pem", "--mqtt-port", "8883"]).expect("certificate option");
+        assert_eq!(cli.mqtt_ca_cert, Some(PathBuf::from("ca.pem")));
+        assert!(!cli.mqtt_insecure);
+        assert_eq!(cli.mqtt_port, 8883);
+    }
+
+    #[test]
+    fn mqtt_insecure_option_keeps_default_port() {
+        let cli = parse_options(&["--mqtt-insecure"]).expect("insecure option");
+        assert!(cli.mqtt_insecure);
+        assert!(cli.mqtt_ca_cert.is_none());
+        assert_eq!(cli.mqtt_port, 1883);
+    }
+
+    #[test]
+    fn mqtt_tls_options_conflict() {
+        let error = parse_options(&["--mqtt-ca-cert", "ca.pem", "--mqtt-insecure"])
+            .err()
+            .expect("conflicting TLS options");
+        assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
 }

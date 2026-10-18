@@ -1,14 +1,22 @@
 use std::fmt;
+use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
-use rumqttc::Outgoing;
 use rumqttc::v5::{
     AsyncClient, Event, EventLoop, MqttOptions,
     mqttbytes::{
         QoS,
         v5::{ConnectReturnCode, LastWill, Packet},
     },
+};
+use rumqttc::{Outgoing, Transport};
+use rustls::{
+    ClientConfig, DigitallySignedStruct, SignatureScheme,
+    client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
+    crypto::{CryptoProvider, verify_tls12_signature, verify_tls13_signature},
+    pki_types::{CertificateDer, ServerName, UnixTime},
 };
 use serde::Serialize;
 use thiserror::Error;
@@ -24,6 +32,8 @@ pub const OFFLINE_PAYLOAD: &str = "offline";
 pub struct MqttConfig {
     pub server: String,
     pub port: u16,
+    pub ca_cert: Option<PathBuf>,
+    pub insecure: bool,
     pub client_id: String,
     pub user: String,
     pub password: String,
@@ -38,6 +48,8 @@ impl MqttConfig {
         Self {
             server: server.into(),
             port: 1883,
+            ca_cert: None,
+            insecure: false,
             client_id: "velux2mqtt".to_owned(),
             user: String::new(),
             password: String::new(),
@@ -51,8 +63,14 @@ impl MqttConfig {
     ///
     /// # Errors
     ///
-    /// Returns an error for empty client/server values or MQTT wildcard/NUL characters.
+    /// Returns an error for invalid client/server values, base topics, connection limits,
+    /// or conflicting TLS options.
     pub fn validate(&mut self) -> Result<(), MqttError> {
+        if self.ca_cert.is_some() && self.insecure {
+            return Err(MqttError::InvalidConfiguration(
+                "MQTT CA certificate and insecure TLS options are mutually exclusive",
+            ));
+        }
         self.server = self.server.trim().to_owned();
         self.client_id = self.client_id.trim().to_owned();
         self.base_topic = self.base_topic.trim().trim_matches('/').to_owned();
@@ -75,6 +93,29 @@ impl MqttConfig {
         }
         Ok(())
     }
+
+    fn transport(&self) -> Result<Transport, MqttError> {
+        if let Some(path) = &self.ca_cert {
+            let ca = std::fs::read(path).map_err(|error| MqttError::CertificateRead {
+                path: path.clone(),
+                message: error.to_string(),
+            })?;
+            Ok(Transport::tls(ca, None, None))
+        } else if self.insecure {
+            log::warn!(
+                "MQTT TLS certificate validation is disabled; the connection is vulnerable to man-in-the-middle attacks"
+            );
+            let builder = ClientConfig::builder();
+            let verifier = NoCertificateVerification(builder.crypto_provider().clone());
+            let config = builder
+                .dangerous()
+                .with_custom_certificate_verifier(Arc::new(verifier))
+                .with_no_client_auth();
+            Ok(Transport::tls_with_config(config.into()))
+        } else {
+            Ok(Transport::tcp())
+        }
+    }
 }
 
 impl fmt::Debug for MqttConfig {
@@ -83,6 +124,8 @@ impl fmt::Debug for MqttConfig {
             .debug_struct("MqttConfig")
             .field("server", &self.server)
             .field("port", &self.port)
+            .field("ca_cert", &self.ca_cert)
+            .field("insecure", &self.insecure)
             .field("client_id", &self.client_id)
             .field("user_configured", &(!self.user.is_empty()))
             .field("password", &"[REDACTED]")
@@ -90,6 +133,45 @@ impl fmt::Debug for MqttConfig {
             .field("keep_alive", &self.keep_alive)
             .field("request_capacity", &self.request_capacity)
             .finish()
+    }
+}
+
+#[derive(Debug)]
+struct NoCertificateVerification(Arc<CryptoProvider>);
+
+impl ServerCertVerifier for NoCertificateVerification {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: UnixTime,
+    ) -> Result<ServerCertVerified, rustls::Error> {
+        Ok(ServerCertVerified::assertion())
+    }
+
+    // Only certificate trust and hostname validation are skipped, not handshake signatures.
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        verify_tls12_signature(message, cert, dss, &self.0.signature_verification_algorithms)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        verify_tls13_signature(message, cert, dss, &self.0.signature_verification_algorithms)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.0.signature_verification_algorithms.supported_schemes()
     }
 }
 
@@ -520,11 +602,13 @@ impl MqttConnection {
     ///
     /// # Errors
     ///
-    /// Returns an error for invalid configuration or base topics.
+    /// Returns an error for invalid configuration, base topics, or unreadable CA certificates.
     pub fn new(mut config: MqttConfig) -> Result<Self, MqttError> {
         config.validate()?;
+        let transport = config.transport()?;
         let topics = TopicLayout::new(&config.base_topic)?;
         let mut options = MqttOptions::new(config.client_id, config.server, config.port);
+        options.set_transport(transport);
         options.set_clean_start(true);
         options.set_keep_alive(config.keep_alive);
         options.set_last_will(LastWill::new(
@@ -675,6 +759,8 @@ const fn cover_state_label(state: CoverState) -> &'static str {
 pub enum MqttError {
     #[error("invalid MQTT configuration: {0}")]
     InvalidConfiguration(&'static str),
+    #[error("failed to read MQTT CA certificate {}: {message}", path.display())]
+    CertificateRead { path: PathBuf, message: String },
     #[error("invalid MQTT base topic '{topic}'")]
     InvalidBaseTopic { topic: String },
     #[error("retained MQTT commands are ignored")]
@@ -700,6 +786,27 @@ pub enum MqttError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn conflicting_tls_options_fail_at_startup() {
+        let mut config = MqttConfig::new("localhost");
+        config.ca_cert = Some("ca.pem".into());
+        config.insecure = true;
+        let error = MqttConnection::new(config).err().expect("conflicting TLS options");
+        assert_eq!(
+            error,
+            MqttError::InvalidConfiguration("MQTT CA certificate and insecure TLS options are mutually exclusive")
+        );
+    }
+
+    #[test]
+    fn unreadable_ca_certificate_fails_at_startup() {
+        let mut config = MqttConfig::new("localhost");
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/missing-mqtt-ca.pem");
+        config.ca_cert = Some(path.clone());
+        let error = MqttConnection::new(config).err().expect("missing CA certificate");
+        assert!(matches!(error, MqttError::CertificateRead { path: actual, .. } if actual == path));
+    }
 
     #[test]
     fn configures_v5_last_will_and_clean_session() {

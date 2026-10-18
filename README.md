@@ -51,6 +51,8 @@ just run -v
 | `--klf-reboot-reconnect-delay` | `V2M_KLF_REBOOT_RECONNECT_DELAY` | `30` seconds |
 | `--mqtt-addr` | `V2M_MQTT_ADDRESS` | required |
 | `--mqtt-port` | `V2M_MQTT_PORT` | `1883` |
+| `--mqtt-ca-cert` | `V2M_MQTT_CA_CERT` | no MQTT TLS |
+| `--mqtt-insecure` | `V2M_MQTT_INSECURE` | `false` |
 | `--mqtt-user` | `V2M_MQTT_USER` | empty |
 | `--mqtt-pass` | `V2M_MQTT_PASS` | empty |
 | `--mqtt-client-id` | `V2M_CLIENT_ID` | `velux2mqtt` |
@@ -89,6 +91,19 @@ export V2M_KLF_CERTIFICATE="$PWD/klf200.pem"
 Do not assume a certificate copied from another KLF belongs to your gateway.
 
 ## MQTT
+
+### TLS
+
+MQTT uses plaintext TCP by default. Choose one of these mutually exclusive options to enable TLS:
+
+- **Certificate validation:** `--mqtt-ca-cert /path/to/ca.pem` (or `V2M_MQTT_CA_CERT=/path/to/ca.pem`). Provide PEM CA certificates or the broker's self-signed certificate. The broker certificate must match `--mqtt-addr`. Unreadable files fail at startup; invalid certificates are reported when connecting.
+- **Disable certificate validation:** `--mqtt-insecure` (or `V2M_MQTT_INSECURE=true`). Traffic is encrypted, but the broker's identity is not verified. This is vulnerable to man-in-the-middle attacks; prefer providing a certificate file.
+
+Set `--mqtt-port 8883` (or `V2M_MQTT_PORT=8883`) if your broker uses the standard TLS port. Enabling TLS does not change the default port of `1883`. These options affect only MQTT; the KLF gateway certificate is configured separately with `--certificate`.
+
+When using Docker, mount the certificate file read-only and set `V2M_MQTT_CA_CERT` to its path inside the container.
+
+### Topics
 
 The default base topic is `velux`. State and metadata use QoS 1 and retained publications.
 

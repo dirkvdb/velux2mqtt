@@ -1030,6 +1030,7 @@ impl ReconnectBackoff {
     }
 }
 
+#[allow(clippy::double_must_use)]
 #[async_trait]
 trait Broker: Send {
     async fn poll(&mut self) -> Result<MqttEvent, MqttError>;
@@ -1057,6 +1058,7 @@ impl Broker for MqttConnection {
     }
 }
 
+#[allow(clippy::double_must_use)]
 #[async_trait]
 trait GatewayConnector: Send + Sync {
     async fn connect(&self, config: Klf200Config) -> std::result::Result<Arc<dyn Gateway>, KlfError>;
@@ -1073,6 +1075,7 @@ impl GatewayConnector for TlsGatewayConnector {
     }
 }
 
+#[allow(clippy::double_must_use)]
 #[async_trait]
 trait Gateway: Send + Sync {
     fn subscribe(&self) -> broadcast::Receiver<ConnectionEvent>;

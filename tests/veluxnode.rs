@@ -211,7 +211,7 @@ fn state_updates_are_change_detected_and_cache_reconciles_removed_nodes() {
     let mut cache = VeluxNodeCache::new();
     let initial = cache.reconcile(vec![first.clone(), second]);
     assert_eq!(initial.added, [NodeId::new(1), NodeId::new(2)]);
-    assert!(initial.removed.is_empty());
+    assert_eq!(initial.removed, Vec::new());
 
     let reconciled = cache.reconcile(vec![first]);
     assert_eq!(reconciled.removed, [NodeId::new(2)]);
@@ -236,7 +236,7 @@ fn state_updates_are_change_detected_and_cache_reconciles_removed_nodes() {
     );
     assert_eq!(cache.apply_response(&Response::NodeStatePosition(state)), None);
     assert_eq!(cache.set_all_available(false), [NodeId::new(1)]);
-    assert!(cache.set_all_available(false).is_empty());
+    assert_eq!(cache.set_all_available(false), Vec::new());
 
     let changed = NodeInformationChanged {
         node_id: NodeId::new(1),

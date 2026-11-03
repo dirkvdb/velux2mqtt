@@ -285,12 +285,9 @@ async fn treats_no_configured_groups_as_empty_discovery() {
     );
     write_response(&mut gateway, CommandId::GW_GET_ALL_GROUPS_INFORMATION_CFM, &[2, 0]).await;
 
-    assert!(
-        discovery
-            .await
-            .expect("discovery task")
-            .expect("empty discovery")
-            .is_empty()
+    assert_eq!(
+        discovery.await.expect("discovery task").expect("empty discovery"),
+        Vec::new()
     );
     complete_shutdown(client, &mut gateway, &mut decoder)
         .await

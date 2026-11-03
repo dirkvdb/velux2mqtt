@@ -130,9 +130,9 @@ mod tests {
     #[test]
     fn ignores_noise_empty_frames_and_incomplete_input() {
         let mut decoder = Decoder::default();
-        assert!(decoder.push(&[1, 2, 3]).is_empty());
-        assert!(decoder.push(&[END, END, END]).is_empty());
-        assert!(decoder.push(&[1, 2]).is_empty());
+        assert_eq!(decoder.push(&[1, 2, 3]), Vec::new());
+        assert_eq!(decoder.push(&[END, END, END]), Vec::new());
+        assert_eq!(decoder.push(&[1, 2]), Vec::new());
         assert_eq!(decoder.push(&[END]), [Ok(vec![1, 2])]);
     }
 
@@ -148,7 +148,7 @@ mod tests {
             decoder.push(&[1, 2, 3]),
             [Err(KlfError::SlipFrameTooLarge { maximum: 2 })]
         );
-        assert!(decoder.push(&[END]).is_empty());
+        assert_eq!(decoder.push(&[END]), Vec::new());
         assert_eq!(decoder.push(&[ESC, END]), [Err(KlfError::IncompleteSlipEscape)]);
     }
 

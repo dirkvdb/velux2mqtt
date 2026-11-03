@@ -253,16 +253,31 @@ fn publishes_explicit_unknown_leaf_values() {
 #[test]
 fn creates_home_assistant_cover_without_unsupported_controls() {
     let topics = TopicLayout::new("velux").expect("valid topic");
-    let discovery = HomeAssistantDiscovery::new("Living Room Gateway");
+    let mut discovery = HomeAssistantDiscovery::new("Living Room Gateway");
     let node = VeluxNode::from_information(node_information(7, "Office", 2));
-    let publication = discovery
-        .publication(&topics, &node)
-        .expect("serialize discovery")
-        .expect("controllable cover");
-    assert_eq!(publication.topic, "homeassistant/cover/velux_0001020304050607/config");
+    let unsupported = VeluxNode::from_information(node_information(8, "Light", 6));
+    let publications = discovery
+        .publications(&topics, [&node, &unsupported], [])
+        .expect("serialize discovery");
+    let publication = publications
+        .iter()
+        .find(|publication| publication.topic == discovery.device_topic())
+        .expect("device discovery");
+    assert_eq!(
+        publication.topic,
+        "homeassistant/device/living_room_gateway_gateway/config"
+    );
     assert!(publication.retained);
-    let payload = json_payload(&publication.payload);
-    assert_eq!(payload["availability_topic"], "velux/state");
+    let device = json_payload(&publication.payload);
+    assert_eq!(device["availability_topic"], "velux/state");
+    assert_eq!(device["device"]["manufacturer"], "VELUX");
+    assert_eq!(device["device"]["model"], "KLF 200");
+    assert_eq!(device["origin"]["name"], "velux2mqtt");
+    assert_eq!(device["cmps"].as_object().expect("components").len(), 1);
+    let payload = &device["cmps"]["velux_0001020304050607"];
+    assert_eq!(payload["p"], "cover");
+    assert_eq!(payload["unique_id"], "velux_0001020304050607");
+    assert_eq!(payload["object_id"], "velux_0001020304050607");
     assert_eq!(payload["command_topic"], "velux/velux_node_7/cmnd/control");
     assert_eq!(payload["state_topic"], "velux/velux_node_7/state");
     assert_eq!(payload["position_topic"], "velux/velux_node_7/position");
@@ -270,46 +285,103 @@ fn creates_home_assistant_cover_without_unsupported_controls() {
     assert_eq!(payload["payload_close"], "CLOSE");
     assert_eq!(payload["position_closed"], 0);
     assert_eq!(payload["position_open"], 100);
-    assert_eq!(payload["device"]["manufacturer"], "VELUX");
-    assert_eq!(payload["device"]["model"], "roller_shutter");
-    assert_eq!(payload["origin"]["name"], "velux2mqtt");
+    assert_eq!(payload["device_class"], "shutter");
+    assert!(payload.get("device").is_none());
     assert!(payload.get("payload_stop").is_none());
     assert!(payload.get("set_position_topic").is_none());
-
-    let unsupported = VeluxNode::from_information(node_information(8, "Light", 6));
-    assert!(
-        discovery
-            .publication(&topics, &unsupported)
-            .expect("valid unsupported node")
-            .is_none()
-    );
 }
 
 #[test]
 fn creates_optimistic_home_assistant_group_with_open_and_close_only() {
     let topics = TopicLayout::new("velux").expect("valid topic");
-    let discovery = HomeAssistantDiscovery::new("Living Room Gateway");
+    let mut discovery = HomeAssistantDiscovery::new("Living Room Gateway");
     let group = group_information(7, "Awning blind", &[3, 8]);
-    let publication = discovery
-        .group_publication(&topics, &group)
+    let node = VeluxNode::from_information(node_information(3, "Office", 2));
+    let publications = discovery
+        .publications(&topics, [&node], [&group])
         .expect("serialize group discovery");
+    let publication = publications
+        .iter()
+        .find(|publication| publication.topic == discovery.device_topic())
+        .expect("device discovery");
     assert_eq!(
         publication.topic,
-        "homeassistant/cover/living_room_gateway_group_7/config"
+        "homeassistant/device/living_room_gateway_gateway/config"
     );
     assert!(publication.retained);
-    let payload = json_payload(&publication.payload);
+    let device = json_payload(&publication.payload);
+    assert_eq!(device["cmps"].as_object().expect("components").len(), 2);
+    assert_eq!(device["availability_topic"], "velux/state");
+    let payload = &device["cmps"]["living_room_gateway_group_7"];
     assert_eq!(payload["name"], "Awning blind");
-    assert_eq!(payload["availability_topic"], "velux/state");
     assert_eq!(payload["command_topic"], "velux/velux_group_7/cmnd/control");
     assert_eq!(payload["payload_open"], "OPEN");
     assert_eq!(payload["payload_close"], "CLOSE");
     assert_eq!(payload["optimistic"], true);
-    assert_eq!(payload["device"]["model"], "group");
+    assert_eq!(payload["p"], "cover");
+    assert!(payload.get("device").is_none());
     assert!(payload.get("state_topic").is_none());
     assert!(payload.get("position_topic").is_none());
     assert!(payload.get("payload_stop").is_none());
     assert!(payload.get("payload_toggle").is_none());
+}
+
+#[test]
+fn migrates_legacy_discovery_before_publishing_the_shared_device() {
+    let topics = TopicLayout::new("home/velux").expect("valid topic");
+    let mut discovery = HomeAssistantDiscovery::with_prefix("Gateway A", "/custom/");
+    let node = VeluxNode::from_information(node_information(7, "Office", 2));
+    let group = group_information(3, "Upstairs", &[7]);
+    let publications = discovery.publications(&topics, [&node], [&group]).expect("discovery");
+    assert_eq!(publications.len(), 5);
+    assert_eq!(publications[2].topic, "custom/device/gateway_a_gateway/config");
+    let payload = json_payload(&publications[2].payload);
+    assert_eq!(payload["device"]["identifiers"], json!(["gateway_a_gateway"]));
+    assert_eq!(payload["availability_topic"], "home/velux/state");
+    for (index, id) in ["gateway_a_group_3", "velux_0001020304050607"].iter().enumerate() {
+        assert_eq!(publications[index].topic, format!("custom/cover/{id}/config"));
+        assert_eq!(
+            json_payload(&publications[index].payload),
+            json!({"migrate_discovery": true})
+        );
+        assert_eq!(publications[index + 3].topic, publications[index].topic);
+        assert!(publications[index + 3].payload.is_empty());
+    }
+    assert!(publications.iter().all(|publication| publication.retained));
+    let other = HomeAssistantDiscovery::new("Gateway B");
+    assert_ne!(discovery.device_topic(), other.device_topic());
+}
+
+#[test]
+fn removes_missing_components_before_publishing_the_current_inventory() {
+    let topics = TopicLayout::new("velux").expect("valid topic");
+    let mut discovery = HomeAssistantDiscovery::new("gateway");
+    let node = VeluxNode::from_information(node_information(7, "Office", 2));
+    let group = group_information(3, "Upstairs", &[7]);
+    discovery
+        .publications(&topics, [&node], [&group])
+        .expect("initial discovery");
+    let publications = discovery.publications(&topics, [&node], []).expect("updated discovery");
+    let updates = publications
+        .iter()
+        .filter(|publication| publication.topic == discovery.device_topic())
+        .collect::<Vec<_>>();
+    assert_eq!(updates.len(), 2);
+    assert_eq!(
+        json_payload(&updates[0].payload)["cmps"]["gateway_group_3"],
+        json!({"p": "cover"})
+    );
+    let current = json_payload(&updates[1].payload);
+    assert!(current["cmps"].get("gateway_group_3").is_none());
+    assert_eq!(
+        current["cmps"]["velux_0001020304050607"]["unique_id"],
+        "velux_0001020304050607"
+    );
+    let cleared = discovery.publications(&topics, [], []).expect("empty inventory");
+    assert_eq!(cleared.len(), 1);
+    assert_eq!(cleared[0].topic, discovery.device_topic());
+    assert!(cleared[0].retained);
+    assert!(cleared[0].payload.is_empty());
 }
 
 fn json_payload(payload: &[u8]) -> Value {

@@ -526,6 +526,9 @@ impl VeluxMqttBridge {
             if metadata_changed && let Err(error) = self.publish_node_info(node_id).await {
                 log::error!("failed to publish metadata for node {}: {error:#}", node_id.get());
             }
+            if metadata_changed && let Err(error) = self.publish_hass_discovery().await {
+                log::error!("failed to publish Home Assistant discovery: {error:#}");
+            }
             if self.cache.get(node_id).is_some_and(VeluxNode::is_controllable)
                 && let Err(error) = self.publish_node_status(node_id).await
             {
@@ -551,6 +554,7 @@ impl VeluxMqttBridge {
                 if self.mqtt_connected {
                     self.publish_group_inventory().await?;
                     self.publish_group_info(&group).await?;
+                    self.publish_hass_discovery().await?;
                 }
             }
             Some(None) => {
@@ -564,6 +568,7 @@ impl VeluxMqttBridge {
                 {
                     self.publish_group_inventory().await?;
                     self.clear_removed_groups(&[group]).await?;
+                    self.publish_hass_discovery().await?;
                 }
             }
             None => {}
@@ -593,17 +598,13 @@ impl VeluxMqttBridge {
             self.mqtt.publish(self.topics.info_publication(&node)?).await?;
             if node.is_controllable() {
                 self.mqtt.publish_all(self.topics.status_publications(&node)?).await?;
-                if let Some(discovery) = &self.discovery
-                    && let Some(publication) = discovery.publication(&self.topics, &node)?
-                {
-                    self.mqtt.publish(publication).await?;
-                }
             }
         }
         let groups = self.groups.values().cloned().collect::<Vec<_>>();
         for group in groups {
             self.publish_group_info(&group).await?;
         }
+        self.publish_hass_discovery().await?;
         self.mqtt.publish(self.topics.availability_publication(true)).await?;
         Ok(())
     }
@@ -624,10 +625,21 @@ impl VeluxMqttBridge {
 
     async fn publish_group_info(&mut self, group: &GroupInformation) -> Result<()> {
         self.mqtt.publish(self.topics.group_info_publication(group)?).await?;
-        if let Some(discovery) = &self.discovery {
+        Ok(())
+    }
+
+    async fn publish_hass_discovery(&mut self) -> Result<()> {
+        if self.mqtt_connected
+            && let Some(mut discovery) = self.discovery.clone()
+        {
             self.mqtt
-                .publish(discovery.group_publication(&self.topics, group)?)
+                .publish_all(discovery.publications(
+                    &self.topics,
+                    self.cache.iter().map(|(_, node)| node),
+                    self.groups.values(),
+                )?)
                 .await?;
+            self.discovery = Some(discovery);
         }
         Ok(())
     }
@@ -1183,10 +1195,10 @@ mod tests {
         assert_eq!(latest_json(&publications, "velux/nodes"), serde_json::json!([7, 8]));
         assert!(has_topic(&publications, "velux/velux_node_7/info"));
         assert!(has_topic(&publications, "velux/velux_node_7/status"));
-        assert!(has_topic(
-            &publications,
-            "homeassistant/cover/velux_0001020304050607/config"
-        ));
+        let discovery = latest_json(&publications, "homeassistant/device/test_bridge_gateway/config");
+        assert_eq!(discovery["cmps"]["velux_0001020304050607"]["p"], "cover");
+        assert_eq!(discovery["cmps"]["test_bridge_group_4"]["p"], "cover");
+        assert!(discovery["cmps"].get("velux_0001020304050608").is_none());
         exercise_group_support(&mqtt_tx, &first, &publications).await;
         assert!(!has_topic(
             &publications,
@@ -1249,6 +1261,9 @@ mod tests {
         ));
         assert_eq!(latest_json(&publications, "velux/nodes"), serde_json::json!([9]));
         assert_eq!(latest_json(&publications, "velux/groups"), serde_json::json!([]));
+        let discovery = latest_json(&publications, "homeassistant/device/test_bridge_gateway/config");
+        assert_eq!(discovery["cmps"].as_object().expect("components").len(), 1);
+        assert_eq!(discovery["cmps"]["velux_0001020304050609"]["p"], "cover");
 
         shutdown_tx.send(()).expect("bridge still running");
         task.await.expect("bridge task joins").expect("clean shutdown");
@@ -1268,7 +1283,7 @@ mod tests {
         };
         drop(mqtt_tx);
         let connector = Arc::new(FakeConnector::new([]));
-        let mut bridge = test_bridge(mqtt, connector, false);
+        let mut bridge = test_bridge(mqtt, connector, true);
         bridge.mqtt_connected = true;
 
         bridge
@@ -1276,6 +1291,11 @@ mod tests {
             .await;
 
         assert_eq!(latest_json(&publications, "velux/nodes"), serde_json::json!([4]));
+        assert_eq!(
+            latest_json(&publications, "homeassistant/device/test_bridge_gateway/config")["cmps"]["velux_0001020304050604"]
+                ["name"],
+            "New node"
+        );
     }
 
     async fn exercise_group_support(
@@ -1285,10 +1305,11 @@ mod tests {
     ) {
         assert_eq!(latest_json(publications, "velux/groups"), serde_json::json!([4]));
         assert!(has_topic(publications, "velux/velux_group_4/info"));
-        assert!(has_topic(
-            publications,
-            "homeassistant/cover/test_bridge_group_4/config"
-        ));
+        assert_eq!(
+            latest_json(publications, "homeassistant/device/test_bridge_gateway/config")["cmps"]["test_bridge_group_4"]
+                ["name"],
+            "Upstairs"
+        );
 
         for (payload, retained) in [("OPEN", true), ("TOGGLE", false), ("OPEN", false), ("CLOSE", false)] {
             mqtt_tx
@@ -1311,9 +1332,21 @@ mod tests {
             information: Some(temporary_group),
         }));
         wait_until(|| has_topic(publications, "velux/velux_group_5/info")).await;
+        wait_until(|| {
+            latest_json(publications, "homeassistant/device/test_bridge_gateway/config")["cmps"]
+                .get("test_bridge_group_5")
+                .is_some()
+        })
+        .await;
         assert_eq!(latest_json(publications, "velux/groups"), serde_json::json!([4, 5]));
         gateway.notify(Response::GroupDeleted(GroupId::new(5)));
         wait_until(|| has_empty_topic(publications, "velux/velux_group_5/info")).await;
+        wait_until(|| {
+            latest_json(publications, "homeassistant/device/test_bridge_gateway/config")["cmps"]
+                .get("test_bridge_group_5")
+                .is_none()
+        })
+        .await;
         assert_eq!(latest_json(publications, "velux/groups"), serde_json::json!([4]));
     }
 

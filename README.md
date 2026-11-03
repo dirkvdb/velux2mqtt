@@ -143,11 +143,15 @@ Enable discovery with:
 V2M_HASS_DISCOVERY=true
 ```
 
-Controllable nodes and discovered groups publish retained cover discovery records under
-`homeassistant/cover/<unique_id>/config`. Group entities are optimistic and expose only open/close
-because KLF does not provide a reliable aggregate group state. Unsupported node types remain visible
-in generic node metadata but are not exposed as unsafe cover controls. MQTT intentionally exposes no
-`STOP` or arbitrary position command.
+Controllable nodes and discovered groups are grouped under one **VELUX KLF 200** device, using a retained
+`homeassistant/device/<normalized_client_id>_gateway/config` payload containing all cover components.
+Use a distinct, stable `--mqtt-client-id` for each gateway. Existing entity unique IDs and MQTT
+state/command topics are preserved. Node/group additions, metadata changes, removals, and reconnects
+refresh the combined discovery configuration.
+
+Group entities are optimistic and expose only open/close because KLF does not provide a reliable aggregate
+group state. Unsupported node types remain visible in generic node metadata but are not exposed as unsafe
+cover controls. MQTT intentionally exposes no `STOP` or arbitrary position command.
 
 ## Docker
 
